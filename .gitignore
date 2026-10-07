@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Launcher-created environment (macOS; Windows uses %LOCALAPPDATA%)
+.venv/
+
+# PyInstaller output from build_app.py
+build/
+dist/
+*.spec
+
+# OS clutter
+.DS_Store
+Thumbs.db
