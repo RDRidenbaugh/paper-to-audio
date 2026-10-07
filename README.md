@@ -14,33 +14,58 @@ It doesn't just read the PDF top to bottom. It handles the things that make jour
 
 `example_output/` contains the result for the included paper (Herrig et al. 2024): 72 minutes, 15 chapters, plus the transcript of exactly what is spoken.
 
-## Running it
+## Download
 
-### Option A – double-click launcher (easiest)
+No Python needed. Download the app for your computer:
+
+| Computer | Download |
+|---|---|
+| **Windows 10 / 11** | [Paper-to-Audio-Windows.exe](https://github.com/RDRidenbaugh/paper-to-audio/raw/main/downloads/Paper-to-Audio-Windows.exe) |
+| **Mac with Apple Silicon** (M1 or newer) | [Paper-to-Audio-macOS.zip](https://github.com/RDRidenbaugh/paper-to-audio/raw/main/downloads/Paper-to-Audio-macOS.zip) |
+
+To check which kind of Mac you have, open the Apple menu → **About This Mac**. "Chip: Apple M…" means Apple Silicon. "Processor: Intel" means an Intel Mac; on those, use the [launcher](#run-from-source-with-the-launcher) instead.
+
+The apps aren't signed with a paid Apple or Microsoft developer certificate, so each system warns you the first time you open the app.
+
+### Windows
+
+1. Download `Paper-to-Audio-Windows.exe`. You can keep it anywhere, for example on the Desktop.
+2. Double-click it. If **"Windows protected your PC"** appears, click **More info**, then **Run anyway**.
+3. The app takes a few seconds to open each time because it unpacks itself first.
+
+### macOS
+
+1. Download `Paper-to-Audio-macOS.zip`. Your browser usually unzips it automatically; if it doesn't, double-click the zip.
+2. Drag **Paper to Audio** into your **Applications** folder.
+3. Double-click it. macOS will say it can't verify the app. Click **Done** (or **OK**).
+4. Open **System Settings → Privacy & Security**, scroll down to the message about "Paper to Audio", and click **Open Anyway**. Confirm with your password. You only need to do this once.
+
+If macOS instead says the app **"is damaged and can't be opened"**, open Terminal and run the following, then open the app again:
+
+```
+xattr -dr com.apple.quarantine "/Applications/Paper to Audio.app"
+```
+
+The downloads are rebuilt automatically by GitHub Actions every time the code on `main` changes.
+
+## Run from source with the launcher
+
+Use this on Intel Macs, or if you'd rather run the Python code directly.
 
 1. Install **Python 3.10 or newer** from [python.org/downloads](https://www.python.org/downloads/).
    - Windows: tick **"Add python.exe to PATH"** in the installer.
    - macOS: the python.org installer includes the GUI toolkit (Tkinter). If you use Homebrew Python instead, also run `brew install python-tk`.
-2. Copy this folder to the computer and double-click:
+2. Download this repository (green **Code** button → **Download ZIP**, then unzip it) and double-click:
    - **macOS:** `Start Paper to Audio.command`. The first time, macOS may block it: right-click it, choose **Open**, then **Open** again.
    - **Windows:** `Start Paper to Audio.bat`
 3. The first launch takes about a minute while it installs its components into a private Python environment. On macOS that's a `.venv` folder next to the launcher; on Windows it's `%LOCALAPPDATA%\PaperToAudio\venv`. Later launches start straight away.
    - Windows can run the launcher from a WSL or network folder (`\\wsl.localhost\...`). The command window will warn that "UNC paths are not supported"; that message is harmless. Copying the folder to a normal Windows location such as Documents avoids it.
 
-### Option B – build a standalone app
+## Build the app yourself
 
-This produces an app you can give to people who don't have Python. Run it on each OS you want to support, because PyInstaller can't cross-compile:
+`python build_app.py` builds the standalone app for the computer you run it on (PyInstaller can't build for other systems): `dist/Paper to Audio.app` on macOS, `dist/Paper to Audio.exe` on Windows. The GitHub Actions workflow in `.github/workflows/build-apps.yml` does the same on GitHub's Windows and Mac machines and commits the results to `downloads/`.
 
-```
-python build_app.py
-```
-
-- macOS: `dist/Paper to Audio.app` (drag it to Applications)
-- Windows: `dist/Paper to Audio.exe`
-
-Unsigned apps trigger a warning the first time they open. On macOS, right-click and choose Open. On Windows, click "More info" and then "Run anyway".
-
-### Option C – command line
+## Command line
 
 ```
 pip install -r requirements.txt
@@ -87,5 +112,6 @@ paper2audio/gui.py             Tkinter desktop app
 paper2audio/cli.py             command-line interface
 Start Paper to Audio.command   macOS launcher
 Start Paper to Audio.bat       Windows launcher
+downloads/                     prebuilt apps (built by GitHub Actions)
 build_app.py                   builds a standalone .app / .exe with PyInstaller
 ```
