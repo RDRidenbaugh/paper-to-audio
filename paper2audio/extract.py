@@ -33,6 +33,7 @@ TEXT_FLAGS = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
 # Once one of these is reached, everything after it is dropped.
 END_OF_BODY = ("references", "bibliography", "literature cited", "works cited")
 
+BOX_LABEL_RE = re.compile(r"^\s*box\s+\d+\s*$", re.I)
 CAPTION_RE = re.compile(r"^(fig\.?|figure|table|supplementary (fig|table))\s*S?\d+", re.I)
 ABSTRACT_RE = re.compile(r"^\s*abstract\b", re.I)
 # Keyword lists: a "Keywords: ..." / "Key words" / "Index Terms" line, or a bracketed
@@ -89,6 +90,36 @@ def _heading_key(s: str) -> str:
     s = _norm(s).lower()
     s = re.sub(r"^(\d+(\.\d+)*|[ivxlc]+)[.)]?\s+", "", s)  # "2.1 Methods", "IV. Results"
     return s.strip(" .:")
+
+
+def _is_bold(span: dict) -> bool:
+    return bool(span["flags"] & 16) or any(w in span["font"].lower() for w in ("bold", "semibold", "heavy", "black"))
+
+
+def _split_heading_lines(b: dict) -> list[dict]:
+    """Split a block whose first line(s) are a bold heading followed by plain prose.
+
+    Some journals (Nature) typeset "Introduction" and its first paragraph as
+    one block; without the split the heading is read as part of the text.
+    """
+    lines = b["lines"]
+    n = 0
+    for line in lines:
+        spans = [s for s in line["spans"] if s["text"].strip()]
+        if not spans or not all(_is_bold(s) for s in spans):
+            break
+        n += 1
+    if n == 0 or n == len(lines) or n > 3:
+        return [b]
+    head = " ".join("".join(s["text"] for s in l["spans"]) for l in lines[:n])
+    if len(head.split()) > 18 or head.rstrip().endswith("."):
+        return [b]
+
+    def part(ls):
+        x0 = min(l["bbox"][0] for l in ls); y0 = min(l["bbox"][1] for l in ls)
+        x1 = max(l["bbox"][2] for l in ls); y1 = max(l["bbox"][3] for l in ls)
+        return {**b, "lines": ls, "bbox": (x0, y0, x1, y1)}
+    return [part(lines[:n]), part(lines[n:])]
 
 
 def _block_from_dict(b: dict, page_no: int, doc_words: Counter) -> _Block | None:
@@ -216,13 +247,19 @@ def _margin_key(text: str) -> str:
     return re.sub(r"[\d\s]+", " ", text).strip().lower()
 
 
-def _is_heading(b: _Block, body_size: float, toc_titles: set[str]) -> bool:
+def _heading_style(b: _Block, body_family: str, body_size: float) -> bool:
+    """Set like a heading: bold, or in the body typeface, and no smaller than body text."""
+    return b.size >= body_size - 0.3 and (b.bold or b.font.split("-")[0] == body_family)
+
+
+def _is_heading(b: _Block, body_family: str, body_size: float, toc_titles: set[str]) -> bool:
     words = b.text.split()
     if not words or len(words) > 18:
         return False
     key = _heading_key(b.text)
     if toc_titles:
-        return key in toc_titles
+        # Figure panel labels can repeat a section title, but not in a heading style.
+        return key in toc_titles and _heading_style(b, body_family, body_size)
     if b.text.rstrip().endswith((".", ",", ";")) and not re.match(r"^\d+(\.\d+)*\.?\s", b.text):
         return False
     if key in BACK_MATTER or key in ("introduction", "abstract", "background", "methods",
@@ -230,6 +267,27 @@ def _is_heading(b: _Block, body_size: float, toc_titles: set[str]) -> bool:
                                        "conclusion", "conclusions", "results and discussion"):
         return True
     return b.size > body_size + 0.5 or b.bold
+
+
+REFERENCE_ENTRY_RE = re.compile(r"^\[?\d{1,3}[.\])]\s")
+
+
+def _body_font(blocks: list[_Block]) -> tuple[str, float]:
+    """The font family and size carrying the most prose characters.
+
+    Typesetters often vary body size by a tenth of a point (8.2/8.3 pt) to fit
+    lines, so neighbouring sizes are pooled; otherwise a single-size reference
+    list can outweigh the real body text. Numbered reference entries are ignored.
+    """
+    chars = Counter()
+    for b in blocks:
+        if not REFERENCE_ENTRY_RE.match(b.text):
+            chars[(b.font.split("-")[0], b.size)] += len(b.text)
+    if not chars:
+        b = blocks[0]
+        return b.font.split("-")[0], b.size
+    score = lambda k: sum(n for (fam, size), n in chars.items() if fam == k[0] and abs(size - k[1]) <= 0.3)
+    return max(chars, key=lambda k: (score(k), chars[k]))
 
 
 def _toc_titles(doc: pymupdf.Document) -> tuple[set[str], dict[str, int]]:
@@ -262,7 +320,9 @@ def extract(path: str, include_captions: bool = False, include_back_matter: bool
     for i, page in enumerate(doc):
         if progress:
             progress(i / doc.page_count, f"Reading page {i + 1} of {doc.page_count}")
-        raw = [_block_from_dict(b, i, doc_words) for b in page.get_text("dict", flags=TEXT_FLAGS)["blocks"] if b["type"] == 0]
+        raw = [_block_from_dict(part, i, doc_words)
+               for b in page.get_text("dict", flags=TEXT_FLAGS)["blocks"] if b["type"] == 0
+               for part in _split_heading_lines(b)]
         raw = [b for b in raw if b]
         h = page.rect.height
         kept = []
@@ -276,14 +336,7 @@ def extract(path: str, include_captions: bool = False, include_back_matter: bool
     if not blocks:
         raise ValueError("No text found. This PDF may be a scanned image; run OCR on it first.")
 
-    # The body font size is the one carrying the most characters.
-    size_chars = Counter()
-    font_chars = Counter()
-    for b in blocks:
-        size_chars[b.size] += len(b.text)
-        font_chars[b.font.split("-")[0]] += len(b.text)
-    body_size = size_chars.most_common(1)[0][0]
-    body_family = font_chars.most_common(1)[0][0]
+    body_family, body_size = _body_font(blocks)
 
     meta = doc.metadata or {}
     title = _norm(meta.get("title") or "")
@@ -304,6 +357,8 @@ def extract(path: str, include_captions: bool = False, include_back_matter: bool
     title_key = _heading_key(title)
     skipping = False
     ended = False
+    box_label = False                 # previous block was a "Box 1" label
+    box_section: Section | None = None
 
     for idx, b in enumerate(blocks):
         if ended:
@@ -312,6 +367,9 @@ def extract(path: str, include_captions: bool = False, include_back_matter: bool
             continue
         family = b.font.split("-")[0]
         text = b.text
+        after_box_label, box_label = box_label, bool(BOX_LABEL_RE.match(text))
+        if box_label:
+            continue
 
         # Headings that wrap over two lines are often split into two blocks.
         prev = sections[-1]
@@ -322,17 +380,19 @@ def extract(path: str, include_captions: bool = False, include_back_matter: bool
                 prev.level = toc_levels.get(joined, prev.level)
                 continue
 
-        if _is_heading(b, body_size, toc_titles) and _heading_key(text) != title_key:
+        if _is_heading(b, body_family, body_size, toc_titles) and _heading_key(text) != title_key:
             key = _heading_key(text)
             if key in END_OF_BODY and not include_back_matter:
                 ended = True
                 continue
             skipping = key in BACK_MATTER and not include_back_matter
             sections.append(Section(_norm(text), toc_levels.get(key, 1 if (b.size > body_size or not b.italic) else 2)))
+            box_section = sections[-1] if after_box_label else None
             continue
 
         # First line of a two-line heading only matches the TOC once joined.
-        if toc_titles and len(text.split()) <= 14 and not text.rstrip().endswith("."):
+        if toc_titles and len(text.split()) <= 14 and not text.rstrip().endswith(".") \
+                and _heading_style(b, body_family, body_size):
             key = _heading_key(text)
             if any(t.startswith(key + " ") for t in toc_titles):
                 skipping = False
@@ -342,7 +402,13 @@ def extract(path: str, include_captions: bool = False, include_back_matter: bool
         if ABSTRACT_RE.match(text) and abstract is None:
             body = re.sub(r"^\s*abstract\s*[.:—–-]*\s*", "", text, flags=re.I)
             body = KEYWORDS_TAIL_RE.sub("", body)
-            abstract = Section("Abstract", 1, [body])
+            abstract = Section("Abstract", 1, [body] if body else [])
+            continue
+
+        # A bare "Abstract" heading: the abstract is the next block of prose,
+        # often set larger than the body.
+        if abstract is not None and not abstract.paragraphs and len(text.split()) >= 30:
+            abstract.paragraphs.append(KEYWORDS_TAIL_RE.sub("", text))
             continue
 
         if KEYWORDS_RE.match(text):
@@ -362,6 +428,12 @@ def extract(path: str, include_captions: bool = False, include_back_matter: bool
             continue
         if b.page == 0 and not any(s.paragraphs for s in sections) and _looks_like_front_matter(text):
             continue
+
+        # A boxed sidebar set in its own font: once body text resumes, it belongs
+        # to the section the box interrupted, not to the box title.
+        if box_section is not None and sections[-1] is box_section and not box_section.paragraphs:
+            sections.pop()
+        box_section = None
 
         sec = sections[-1]
         # A paragraph split across a column or page break continues mid-sentence.
@@ -404,7 +476,7 @@ def _nest(sections: list[Section]) -> list[Section]:
 
 def _split_names(text: str) -> list[str]:
     text = re.sub(r"[*†‡§¶\d]+", "", text)
-    parts = re.split(r",\s*(?:and\s+)?|\s+and\s+|;", text)
+    parts = re.split(r",\s*(?:and\s+|&\s*)?|\s+(?:and|&)\s+|;", text)
     return [_norm(p) for p in parts if _norm(p)]
 
 
