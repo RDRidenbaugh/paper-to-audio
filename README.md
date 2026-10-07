@@ -24,7 +24,8 @@ It doesn't just read the PDF top to bottom. It handles the things that make jour
 2. Copy this folder to the computer and double-click:
    - **macOS:** `Start Paper to Audio.command`. The first time, macOS may block it: right-click it, choose **Open**, then **Open** again.
    - **Windows:** `Start Paper to Audio.bat`
-3. The first launch takes about a minute while it installs its components into a private `.venv` folder. Later launches start straight away.
+3. The first launch takes about a minute while it installs its components into a private Python environment. On macOS that's a `.venv` folder next to the launcher; on Windows it's `%LOCALAPPDATA%\PaperToAudio\venv`. Later launches start straight away.
+   - Windows can run the launcher from a WSL or network folder (`\\wsl.localhost\...`). The command window will warn that "UNC paths are not supported"; that message is harmless. Copying the folder to a normal Windows location such as Documents avoids it.
 
 ### Option B – build a standalone app
 

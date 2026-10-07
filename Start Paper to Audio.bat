@@ -1,6 +1,12 @@
 @echo off
 rem Windows launcher: double-click in File Explorer. First run sets up a private Python environment.
-cd /d "%~dp0"
+rem
+rem This never changes into the app folder, so it also works when the folder is on a network
+rem share or inside WSL (\\wsl.localhost\...), which CMD can't use as a current directory.
+rem The Python environment lives in %LOCALAPPDATA% rather than next to this file for the same reason.
+setlocal
+set "APP=%~dp0"
+set "VENV=%LOCALAPPDATA%\PaperToAudio\venv"
 
 set "PY="
 for %%c in (py python) do (
@@ -16,19 +22,29 @@ if not defined PY (
   exit /b 1
 )
 
-.venv\Scripts\python.exe -c "import pymupdf, edge_tts, mutagen, tkinter" >nul 2>&1
+"%VENV%\Scripts\python.exe" -c "import pymupdf, edge_tts, mutagen, tkinter" >nul 2>&1
 if errorlevel 1 (
-  echo First run: installing components, about a minute...
-  if exist .venv rmdir /s /q .venv
-  %PY% -m venv .venv || goto :fail
-  .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
-  .venv\Scripts\python.exe -m pip install --quiet -r requirements.txt || goto :fail
+  echo First run: installing components into %VENV%
+  echo This takes about a minute...
+  if exist "%VENV%" rmdir /s /q "%VENV%"
+  %PY% -m venv "%VENV%"
+  if errorlevel 1 (
+    echo.
+    echo Could not create the Python environment in %VENV%
+    goto :fail
+  )
+  "%VENV%\Scripts\python.exe" -m pip install --quiet --upgrade pip
+  "%VENV%\Scripts\python.exe" -m pip install --quiet -r "%APP%requirements.txt"
+  if errorlevel 1 (
+    echo.
+    echo Installing components failed. Check your internet connection and try again.
+    goto :fail
+  )
 )
 
-start "" .venv\Scripts\pythonw.exe paper_to_audio.py %*
+start "" "%VENV%\Scripts\pythonw.exe" "%APP%paper_to_audio.py" %*
 exit /b 0
 
 :fail
-echo Setup failed. Check your internet connection and try again.
 pause
 exit /b 1
