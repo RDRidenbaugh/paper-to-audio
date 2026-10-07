@@ -105,25 +105,34 @@ def silence(like: bytes, seconds: float) -> bytes:
 
 # --- Synthesis ---------------------------------------------------------------
 
+async def _stream(text: str, voice: str, rate: str) -> bytes:
+    out = bytearray()
+    async for chunk in edge_tts.Communicate(text, voice, rate=rate).stream():
+        if chunk["type"] == "audio":
+            out += chunk["data"]
+    return bytes(out)
+
+
 async def _synthesize_one(text: str, voice: str, rate: str, attempts: int = 4) -> bytes:
+    # A healthy request takes about a second per 1,500 characters, but the
+    # service occasionally stalls a connection for 30 s or more. Give up on a
+    # stalled request early and retry instead of holding up the whole paper.
+    timeout = max(10.0, len(text) / 100)
     last: Exception | None = None
     for attempt in range(attempts):
         try:
-            out = bytearray()
-            async for chunk in edge_tts.Communicate(text, voice, rate=rate).stream():
-                if chunk["type"] == "audio":
-                    out += chunk["data"]
+            out = await asyncio.wait_for(_stream(text, voice, rate), timeout)
             if out:
-                return bytes(out)
+                return out
             raise RuntimeError("The speech service returned no audio.")
-        except Exception as e:  # network hiccups, throttling
+        except Exception as e:  # network hiccups, throttling, stalls
             last = e
             await asyncio.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"Speech synthesis failed after {attempts} attempts: {last}") from last
 
 
 def synthesize(segments: list[Segment], voice: str, rate_pct: int, progress=None,
-               cancel: threading.Event | None = None, concurrency: int = 4) -> list[bytes]:
+               cancel: threading.Event | None = None, concurrency: int = 8) -> list[bytes]:
     """Synthesize all segments (in parallel, order preserved). Blocking."""
     rate = f"{rate_pct:+d}%"
 
