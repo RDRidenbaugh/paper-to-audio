@@ -105,52 +105,91 @@ def silence(like: bytes, seconds: float) -> bytes:
 
 # --- Synthesis ---------------------------------------------------------------
 
+class Stalled(Exception):
+    """The speech service stopped sending data mid-request."""
+
+
+# The service occasionally stalls a connection for 30 s or more. Rather than
+# capping the whole request (which also kills requests that are merely slow on
+# a slow connection), give up only when no data has arrived for this long.
+IDLE_TIMEOUT = 15.0
+
+
 async def _stream(text: str, voice: str, rate: str) -> bytes:
     out = bytearray()
-    async for chunk in edge_tts.Communicate(text, voice, rate=rate).stream():
-        if chunk["type"] == "audio":
-            out += chunk["data"]
+    stream = edge_tts.Communicate(text, voice, rate=rate).stream()
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(stream.__anext__(), IDLE_TIMEOUT)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                raise Stalled(f"The speech service stopped responding for {IDLE_TIMEOUT:g} s.") from None
+            if chunk["type"] == "audio":
+                out += chunk["data"]
+    finally:
+        await stream.aclose()
     return bytes(out)
 
 
-async def _synthesize_one(text: str, voice: str, rate: str, attempts: int = 4) -> bytes:
-    # A healthy request takes about a second per 1,500 characters, but the
-    # service occasionally stalls a connection for 30 s or more. Give up on a
-    # stalled request early and retry instead of holding up the whole paper.
-    timeout = max(10.0, len(text) / 100)
+async def _synthesize_one(text: str, voice: str, rate: str, attempts: int = 4,
+                          on_stall=None) -> bytes:
     last: Exception | None = None
     for attempt in range(attempts):
         try:
-            out = await asyncio.wait_for(_stream(text, voice, rate), timeout)
+            out = await _stream(text, voice, rate)
             if out:
                 return out
             raise RuntimeError("The speech service returned no audio.")
         except Exception as e:  # network hiccups, throttling, stalls
             last = e
-            await asyncio.sleep(1.5 * (attempt + 1))
+            if isinstance(e, Stalled) and on_stall:
+                on_stall()
+            if attempt < attempts - 1:
+                await asyncio.sleep(3 * 2 ** attempt)  # 3, 6, 12 s
     raise RuntimeError(f"Speech synthesis failed after {attempts} attempts: {last}") from last
 
 
 def synthesize(segments: list[Segment], voice: str, rate_pct: int, progress=None,
-               cancel: threading.Event | None = None, concurrency: int = 8) -> list[bytes]:
-    """Synthesize all segments (in parallel, order preserved). Blocking."""
+               cancel: threading.Event | None = None, concurrency: int = 8,
+               fallback_concurrency: int = 4) -> list[bytes]:
+    """Synthesize all segments (in parallel, order preserved). Blocking.
+
+    Starts with `concurrency` simultaneous requests and drops to
+    `fallback_concurrency` after the first stall, since stalls usually mean the
+    connection or the service can't keep up.
+    """
     rate = f"{rate_pct:+d}%"
 
     async def run():
-        sem = asyncio.Semaphore(concurrency)
+        limit = concurrency
+        active = 0
+        slots = asyncio.Condition()
         done = 0
         total_chars = sum(len(s.text) for s in segments) or 1
         results: list[bytes | None] = [None] * len(segments)
 
+        def on_stall():
+            nonlocal limit
+            limit = min(limit, fallback_concurrency)
+
         async def work(i: int, seg: Segment):
-            nonlocal done
-            async with sem:
+            nonlocal active, done
+            async with slots:
+                await slots.wait_for(lambda: active < limit)
+                active += 1
+            try:
                 if cancel and cancel.is_set():
                     raise Cancelled()
-                results[i] = await _synthesize_one(seg.text, voice, rate)
+                results[i] = await _synthesize_one(seg.text, voice, rate, on_stall=on_stall)
                 done += len(seg.text)
                 if progress:
                     progress(done / total_chars, f"Generating speech… {int(100 * done / total_chars)}%")
+            finally:
+                async with slots:
+                    active -= 1
+                    slots.notify_all()
 
         tasks = [asyncio.create_task(work(i, s)) for i, s in enumerate(segments)]
         try:
